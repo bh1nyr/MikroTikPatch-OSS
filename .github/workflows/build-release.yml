@@ -1,10 +1,7 @@
-name: Build patched RouterOS release
+name: Build patched RouterOS artifacts
 
-# Builds the patched main package, the signed component packages and the CHR
-# images for one RouterOS version.  Called by check-release.yml when a new
-# upstream version shows up, or run manually (Actions -> Build patched RouterOS
-# release) to build a version without releasing it: manual runs upload the
-# result as workflow artifacts.
+# Builds patched packages and CHR images, then uploads Actions artifacts.
+# Called by check-release.yml or run manually; never creates a release.
 
 on:
   workflow_call:
@@ -13,11 +10,6 @@ on:
         description: RouterOS version to patch (e.g. 7.24.4)
         required: true
         type: string
-      release:
-        description: Create a GitHub release with the artifacts
-        required: false
-        type: boolean
-        default: false
       boot_test:
         description: Boot every built image in QEMU and check the licence
         required: false
@@ -38,11 +30,6 @@ on:
         description: RouterOS version to patch (e.g. 7.24.4)
         required: true
         type: string
-      release:
-        description: Create a GitHub release with the artifacts (otherwise they are uploaded as artifacts)
-        required: true
-        type: boolean
-        default: false
       boot_test:
         description: Boot every built image in QEMU and check the licence
         required: true
@@ -55,13 +42,13 @@ on:
         default: true
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 240
-    # never build/release the same version twice at once
+    # never build the same version twice at once
     concurrency:
       group: routeros-build-${{ inputs.version }}
       cancel-in-progress: false
@@ -162,7 +149,7 @@ jobs:
         run: |
           set -euo pipefail
           {
-            echo "### SHA-256 sums of the release files"
+            echo "### SHA-256 sums of the build files"
             echo
             echo '```'
             (cd "publish/$VERSION" && sha256sum \
@@ -172,21 +159,7 @@ jobs:
             echo 'The block can be saved and checked with: sha256sum -c <file>'
           } >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Assemble the release notes
-        shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
-        run: |
-          set -euo pipefail
-          {
-            echo "Patched RouterOS $VERSION build."
-            echo "- Workflow run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo ""
-            cat "publish/$VERSION/CHANGELOG"
-          } > "$RUNNER_TEMP/release-notes.md"
-
       - name: Upload the build artifacts
-        if: ${{ !inputs.release }}
         uses: actions/upload-artifact@v4
         with:
           name: routeros-${{ inputs.version }}
@@ -198,33 +171,6 @@ jobs:
           if-no-files-found: error
           # npk files and image zips are already compressed
           compression-level: 0
-
-      - name: Create the GitHub release
-        if: ${{ inputs.release }}
-        shell: bash
-        env:
-          VERSION: ${{ inputs.version }}
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          tag="v$VERSION"
-          dir="publish/$VERSION"
-          assets=("$dir"/routeros-*.npk "$dir"/all_packages-*.zip "$dir"/chr-*.img.zip)
-          extra=()
-          case "$VERSION" in *beta*|*rc*) extra+=(--prerelease) ;; esac
-          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "release $tag already exists; uploading the assets"
-            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" --clobber "${assets[@]}"
-          else
-            target=(--target "$GITHUB_SHA")
-            if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$tag" >/dev/null 2>&1; then
-              # a tag without a release: attach the release to it
-              target=()
-            fi
-            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
-              --title "RouterOS $VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" \
-              "${target[@]}" "${extra[@]}" "${assets[@]}"
-          fi
 
       # Save the ISOs even when the build failed, so the next attempt resumes
       # from them instead of re-downloading from the slow CDN.
